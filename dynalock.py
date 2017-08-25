@@ -3,27 +3,34 @@
 import boto3
 import uuid
 import time
+import logging
+
+
+logger = logging.getLogger('dynamo_lock')
 
 
 def millis_in_future(millis):
     return time.time() + (millis/1000.0)
 
 
-class LockerClient():
+class LockerClient:
 
-    def __init__(self, lockTableName):
-        self.lockTableName = lockTableName
-        self.db = boto3.client('dynamodb')
+    def __init__(self, lock_table_name, access_key=None, secret_key=None):
+        self.lock_table_name = lock_table_name
+        self.db = boto3.client(
+            'dynamodb',
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key
+        )
         self.locked = False
         self.guid = ""
 
-    def get_lock(self, lockName, timeoutMillis):
-        # First get the row for 'name'
-        get_item_params = {
-            'TableName': self.lockTableName,
+    def _get_item_params(self, lock_name):
+        return {
+            'TableName': self.lock_table_name,
             'Key': {
                 'name': {
-                    'S': lockName,
+                    'S': lock_name,
                 }
             },
             'AttributesToGet': [
@@ -32,50 +39,73 @@ class LockerClient():
             'ConsistentRead': True,
         }
 
-        # Generate a GUID for our lock
-        guid = str(uuid.uuid4())
-
-        put_item_params = {
+    def _put_item_params(self, lock_name, lock_expiry_ms, guid):
+        return {
             'Item': {
                 'name': {
-                    'S': lockName
+                    'S': lock_name
                 },
                 'guid': {
                     'S': guid
                 },
                 'expiresOn': {
-                    'N': str(millis_in_future(timeoutMillis))
+                    'N': str(millis_in_future(lock_expiry_ms))
                 }
             },
-            'TableName': self.lockTableName
+            'TableName': self.lock_table_name
         }
+
+    def _delete_item_params(self, lock_name):
+        return {
+            'Key': {
+                'name': {
+                    'S': lock_name,
+                }
+            },
+            'ExpressionAttributeValues': {
+                    ':ourguid': {'S': self.guid}
+            },
+            'TableName': self.lock_table_name,
+            'ConditionExpression': "guid = :ourguid"
+        }
+
+    def get_lock(self, lock_name, lock_expiry_ms):
+        # First get the row for 'name'
+        get_item_params = self._get_item_params(lock_name)
+        # Generate a GUID for our lock
+        guid = str(uuid.uuid4())
+        put_item_params = self._put_item_params(lock_name, lock_expiry_ms, guid)
 
         try:
             data = self.db.get_item(**get_item_params)
-            now = time.time()
 
             if 'Item' not in data:
-                # Table exists, but lock not found. We'll try to add a lock
-                # If by the time we try to add we find that the attribute guid exists (because another client grabbed it), the lock will not be added
+                # Table exists, but lock not found. We'll try to add a
+                # lock If by the time we try to add we find that the
+                # attribute guid exists (because another client
+                # grabbed it), the lock will not be added
                 put_item_params['ConditionExpression'] = 'attribute_not_exists(guid)'
 
             # We know there's possibly a lock'. Check to see it's expired yet
-            elif float(data['Item']['expiresOn']['N']) > now:
+            elif float(data['Item']['expiresOn']['N']) > time.time():
                 return False
             else:
-                # We know there's possibly a lock and it's expired. We'll take over, providing that the guid of the lock we read as expired is the one we're
-                # taking over from. This is an atomic conditional update
-                print("Expired lock found. Attempting to aquire")
+                # We know there's possibly a lock and it's
+                # expired. We'll take over, providing that the guid of
+                # the lock we read as expired is the one we're taking
+                # over from. This is an atomic conditional update
+                logger.warning("Expired lock found. Attempting to aquire")
                 put_item_params['ExpressionAttributeValues'] = {
                     ':oldguid': {'S': data['Item']['guid']['S']}
                 }
                 put_item_params['ConditionExpression'] = "guid = :oldguid"
         except Exception as e:
-            print("Exception" + str(e))
+            logger.exception(str(e))
             # Something nasty happened. Possibly table not found
             return False
 
-        # now we're going to try to get the lock. If ANY exception happens, we assume no lock
+        # now we're going to try to get the lock. If ANY exception
+        # happens, we assume no lock
         try:
             self.db.put_item(**put_item_params)
             self.locked = True
@@ -84,29 +114,18 @@ class LockerClient():
         except Exception:
             return False
 
-    def release_lock(self, lockName):
+    def release_lock(self, lock_name):
         if not self.locked:
             return
 
-        delete_item_params = {
-            'Key': {
-                'name': {
-                    'S': lockName,
-                }
-            },
-            'ExpressionAttributeValues': {
-                    ':ourguid': {'S': self.guid}
-            },
-            'TableName': self.lockTableName,
-            'ConditionExpression': "guid = :ourguid"
-        }
+        delete_item_params = self._delete_item_params(lock_name)
 
         try:
             self.db.delete_item(**delete_item_params)
             self.locked = False
             self.guid = ""
         except Exception as e:
-            print(str(e))
+            logger.exception(str(e))
 
     def spinlock(self, lockName, timeoutMillis):
         while not self.get_lock(lockName, timeoutMillis):
@@ -120,7 +139,7 @@ class LockerClient():
                     'AttributeType': 'S'
                 },
             ],
-            TableName=self.lockTableName,
+            TableName=self.lock_table_name,
             KeySchema=[
                 {
                     'AttributeName': 'name',
@@ -132,7 +151,32 @@ class LockerClient():
                 'WriteCapacityUnits': 1
             }
         )
-        print(response)
+        logger.debug(response)
 
     def delete_lock_table(self):
-        self.db.delete_table(TableName=self.lockTableName)
+        self.db.delete_table(TableName=self.lock_table_name)
+
+
+if __name__ == '__main__':
+    import config
+
+    lock = LockerClient(
+        config.DYN_TABLE_NAME,
+        config.DYN_ACCESS_KEY,
+        config.DYN_SECRET_KEY
+    )
+
+    if lock.get_lock('blah', 1000):
+        print("lock acquired")
+    if not lock.get_lock('blah', 1000):
+        print("locked")
+    time.sleep(1)
+    if lock.get_lock('blah', 1000):
+        print("re-acquired")
+    lock.release_lock('blah')
+    print("lock released")
+    if lock.get_lock('blah', 1000):
+        print("re-acquired")
+    time.sleep(1)
+    if lock.get_lock('blah', 1000):
+        print("re-acquired after timeout")

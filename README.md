@@ -6,6 +6,12 @@ It needs better docs, exception handling and testing, but the guts are currently
 
 Forked from: https://github.com/Elethiomel/dynamodb-lock
 
+# Install from pypi
+
+```
+pip3 install dynamo_lock
+```
+
 # Usage
 ```python
 from dynamo_lock import LockerClient

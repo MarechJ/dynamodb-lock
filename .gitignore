@@ -4,3 +4,6 @@ dynamo_lock/config.py
 build/
 *~
 **__pycache__
+dist/
+MANIFEST
+dynamo_lock.egg-info/

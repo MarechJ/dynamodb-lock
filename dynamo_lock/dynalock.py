@@ -69,7 +69,7 @@ class LockerClient:
             'ConditionExpression': "guid = :ourguid"
         }
 
-    def get_lock(self, lock_name, lock_expiry_ms):
+    def acquire(self, lock_name, lock_expiry_ms):
         # First get the row for 'name'
         get_item_params = self._get_item_params(lock_name)
         # Generate a GUID for our lock
@@ -114,7 +114,7 @@ class LockerClient:
         except Exception:
             return False
 
-    def release_lock(self, lock_name):
+    def release(self, lock_name):
         if not self.locked:
             return
 
@@ -127,8 +127,8 @@ class LockerClient:
         except Exception as e:
             logger.exception(str(e))
 
-    def spinlock(self, lockName, timeoutMillis):
-        while not self.get_lock(lockName, timeoutMillis):
+    def spinlock(self, lock_name, lock_expiry_ms):
+        while not self.acquire(lock_name, lock_expiry_ms):
             pass
 
     def create_lock_table(self):
@@ -166,17 +166,18 @@ if __name__ == '__main__':
         config.DYN_SECRET_KEY
     )
 
-    if lock.get_lock('blah', 1000):
+    if lock.acquire('blah', 1000):
         print("lock acquired")
-    if not lock.get_lock('blah', 1000):
+    if not lock.acquire('blah', 1000):
         print("locked")
     time.sleep(1)
-    if lock.get_lock('blah', 1000):
+    if lock.acquire('blah', 2000):
         print("re-acquired")
-    lock.release_lock('blah')
+    lock.spinlock('blah', 1000)
+    lock.release('blah')
     print("lock released")
-    if lock.get_lock('blah', 1000):
+    if lock.acquire('blah', 1000):
         print("re-acquired")
     time.sleep(1)
-    if lock.get_lock('blah', 1000):
+    if lock.acquire('blah', 1000):
         print("re-acquired after timeout")

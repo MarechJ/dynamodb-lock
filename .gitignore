@@ -1,1 +1,6 @@
 .ropeproject
+dynamo_lock/config.py
+
+build/
+*~
+**__pycache__
